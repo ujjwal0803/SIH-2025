@@ -1,302 +1,316 @@
-// src/firebase/services.js
+// services.js
 import { 
-  doc, 
-  getDoc, 
-  setDoc, 
-  updateDoc, 
-  deleteDoc, 
   collection, 
+  addDoc, 
   getDocs, 
-  addDoc,
+  doc, 
+  updateDoc, 
+  deleteDoc,
   query,
   where,
   orderBy,
-  limit,
   onSnapshot
 } from 'firebase/firestore';
-import { db } from './firebase';
+import { 
+  createUserWithEmailAndPassword, 
+  signInWithEmailAndPassword,
+  signOut,
+  onAuthStateChanged 
+} from 'firebase/auth';
+import { ref, uploadBytes, getDownloadURL } from 'firebase/storage';
+import { auth, db, storage } from './firebase';
 
-// Page Content Services
-export const pageServices = {
-  // Get page data
-  getPageData: async (pageId) => {
+// Authentication Services
+export const authServices = {
+  // Register user
+  register: async (email, password, userData) => {
     try {
-      const docRef = doc(db, 'pages', pageId);
-      const docSnap = await getDoc(docRef);
+      const userCredential = await createUserWithEmailAndPassword(auth, email, password);
       
-      if (docSnap.exists()) {
-        return { success: true, data: docSnap.data() };
-      } else {
-        return { success: false, error: 'Page not found' };
-      }
+      // Add user data to Firestore
+      await addDoc(collection(db, 'users'), {
+        uid: userCredential.user.uid,
+        email: email,
+        ...userData,
+        createdAt: new Date(),
+        role: userData.role || 'citizen'
+      });
+      
+      return userCredential.user;
     } catch (error) {
-      console.error('Error fetching page data:', error);
-      return { success: false, error: error.message };
+      throw error;
     }
   },
 
-  // Update page data
-  updatePageData: async (pageId, data) => {
+  // Login user
+  login: async (email, password) => {
     try {
-      const docRef = doc(db, 'pages', pageId);
-      await updateDoc(docRef, data);
-      return { success: true };
+      const userCredential = await signInWithEmailAndPassword(auth, email, password);
+      return userCredential.user;
     } catch (error) {
-      console.error('Error updating page data:', error);
-      return { success: false, error: error.message };
+      throw error;
     }
   },
 
-  // Set page data (create or overwrite)
-  setPageData: async (pageId, data) => {
+  // Logout user
+  logout: async () => {
     try {
-      const docRef = doc(db, 'pages', pageId);
-      await setDoc(docRef, data);
-      return { success: true };
+      await signOut(auth);
     } catch (error) {
-      console.error('Error setting page data:', error);
-      return { success: false, error: error.message };
+      throw error;
     }
   },
 
-  // Listen to page data changes (real-time)
-  listenToPageData: (pageId, callback) => {
-    const docRef = doc(db, 'pages', pageId);
-    return onSnapshot(docRef, (doc) => {
-      if (doc.exists()) {
-        callback({ success: true, data: doc.data() });
-      } else {
-        callback({ success: false, error: 'Page not found' });
-      }
-    }, (error) => {
-      console.error('Error listening to page data:', error);
-      callback({ success: false, error: error.message });
+  // Get current user
+  getCurrentUser: () => {
+    return new Promise((resolve, reject) => {
+      const unsubscribe = onAuthStateChanged(auth, 
+        user => {
+          unsubscribe();
+          resolve(user);
+        },
+        reject
+      );
     });
+  }
+};
+
+// Issues/Reports Services
+export const issueServices = {
+  // Create new issue report
+  createIssue: async (issueData) => {
+    try {
+      const docRef = await addDoc(collection(db, 'issues'), {
+        ...issueData,
+        createdAt: new Date(),
+        status: 'pending',
+        priority: issueData.priority || 'medium',
+        votes: 0,
+        comments: []
+      });
+      return docRef.id;
+    } catch (error) {
+      throw error;
+    }
+  },
+
+  // Get all issues
+  getAllIssues: async (filters = {}) => {
+    try {
+      let q = collection(db, 'issues');
+      
+      if (filters.status) {
+        q = query(q, where('status', '==', filters.status));
+      }
+      
+      if (filters.category) {
+        q = query(q, where('category', '==', filters.category));
+      }
+      
+      q = query(q, orderBy('createdAt', 'desc'));
+      
+      const querySnapshot = await getDocs(q);
+      const issues = [];
+      
+      querySnapshot.forEach((doc) => {
+        issues.push({
+          id: doc.id,
+          ...doc.data()
+        });
+      });
+      
+      return issues;
+    } catch (error) {
+      throw error;
+    }
+  },
+
+  // Update issue status
+  updateIssueStatus: async (issueId, newStatus, updateData = {}) => {
+    try {
+      const issueRef = doc(db, 'issues', issueId);
+      await updateDoc(issueRef, {
+        status: newStatus,
+        updatedAt: new Date(),
+        ...updateData
+      });
+    } catch (error) {
+      throw error;
+    }
+  },
+
+  // Add comment to issue
+  addComment: async (issueId, comment) => {
+    try {
+      const issueRef = doc(db, 'issues', issueId);
+      
+      // First get the current issue to update comments array
+      const issueSnap = await getDocs(query(collection(db, 'issues'), where('__name__', '==', issueId)));
+      const issueData = issueSnap.docs[0].data();
+      
+      const updatedComments = [...(issueData.comments || []), {
+        ...comment,
+        timestamp: new Date()
+      }];
+      
+      await updateDoc(issueRef, {
+        comments: updatedComments,
+        updatedAt: new Date()
+      });
+    } catch (error) {
+      throw error;
+    }
+  },
+
+  // Subscribe to real-time updates
+  subscribeToIssues: (callback, filters = {}) => {
+    let q = collection(db, 'issues');
+    
+    if (filters.status) {
+      q = query(q, where('status', '==', filters.status));
+    }
+    
+    q = query(q, orderBy('createdAt', 'desc'));
+    
+    return onSnapshot(q, (querySnapshot) => {
+      const issues = [];
+      querySnapshot.forEach((doc) => {
+        issues.push({
+          id: doc.id,
+          ...doc.data()
+        });
+      });
+      callback(issues);
+    });
+  }
+};
+
+// File Upload Services
+export const storageServices = {
+  // Upload file
+  uploadFile: async (file, path) => {
+    try {
+      const fileRef = ref(storage, `${path}/${Date.now()}_${file.name}`);
+      const snapshot = await uploadBytes(fileRef, file);
+      const downloadURL = await getDownloadURL(snapshot.ref);
+      return downloadURL;
+    } catch (error) {
+      throw error;
+    }
+  },
+
+  // Upload multiple files
+  uploadMultipleFiles: async (files, path) => {
+    try {
+      const uploadPromises = files.map(file => 
+        storageServices.uploadFile(file, path)
+      );
+      const urls = await Promise.all(uploadPromises);
+      return urls;
+    } catch (error) {
+      throw error;
+    }
   }
 };
 
 // User Services
 export const userServices = {
-  // Create user profile
-  createUserProfile: async (userId, userData) => {
-    try {
-      const docRef = doc(db, 'users', userId);
-      await setDoc(docRef, {
-        ...userData,
-        createdAt: new Date(),
-        updatedAt: new Date()
-      });
-      return { success: true };
-    } catch (error) {
-      console.error('Error creating user profile:', error);
-      return { success: false, error: error.message };
-    }
-  },
-
   // Get user profile
-  getUserProfile: async (userId) => {
+  getUserProfile: async (uid) => {
     try {
-      const docRef = doc(db, 'users', userId);
-      const docSnap = await getDoc(docRef);
+      const q = query(collection(db, 'users'), where('uid', '==', uid));
+      const querySnapshot = await getDocs(q);
       
-      if (docSnap.exists()) {
-        return { success: true, data: docSnap.data() };
-      } else {
-        return { success: false, error: 'User not found' };
+      if (!querySnapshot.empty) {
+        return {
+          id: querySnapshot.docs[0].id,
+          ...querySnapshot.docs[0].data()
+        };
       }
+      return null;
     } catch (error) {
-      console.error('Error fetching user profile:', error);
-      return { success: false, error: error.message };
+      throw error;
     }
   },
 
   // Update user profile
-  updateUserProfile: async (userId, userData) => {
+  updateUserProfile: async (userId, updateData) => {
     try {
-      const docRef = doc(db, 'users', userId);
-      await updateDoc(docRef, {
-        ...userData,
+      const userRef = doc(db, 'users', userId);
+      await updateDoc(userRef, {
+        ...updateData,
         updatedAt: new Date()
       });
-      return { success: true };
     } catch (error) {
-      console.error('Error updating user profile:', error);
-      return { success: false, error: error.message };
-    }
-  }
-};
-
-// Issue Services
-export const issueServices = {
-  // Create new issue
-  createIssue: async (issueData) => {
-    try {
-      const docRef = await addDoc(collection(db, 'issues'), {
-        ...issueData,
-        status: 'pending',
-        createdAt: new Date(),
-        updatedAt: new Date()
-      });
-      return { success: true, id: docRef.id };
-    } catch (error) {
-      console.error('Error creating issue:', error);
-      return { success: false, error: error.message };
+      throw error;
     }
   },
 
-  // Get issues by user
-  getUserIssues: async (userId) => {
+  // Get all staff/admin users
+  getStaffUsers: async () => {
     try {
       const q = query(
-        collection(db, 'issues'),
-        where('userId', '==', userId),
-        orderBy('createdAt', 'desc')
+        collection(db, 'users'), 
+        where('role', 'in', ['admin', 'staff'])
       );
       const querySnapshot = await getDocs(q);
-      const issues = [];
+      const staff = [];
+      
       querySnapshot.forEach((doc) => {
-        issues.push({ id: doc.id, ...doc.data() });
+        staff.push({
+          id: doc.id,
+          ...doc.data()
+        });
       });
-      return { success: true, data: issues };
+      
+      return staff;
     } catch (error) {
-      console.error('Error fetching user issues:', error);
-      return { success: false, error: error.message };
+      throw error;
     }
-  },
+  }
+};
 
-  // Get all issues (for admin/staff)
-  getAllIssues: async (statusFilter = null, limitCount = 50) => {
+// Analytics Services
+export const analyticsServices = {
+  // Get dashboard stats
+  getDashboardStats: async () => {
     try {
-      let q = query(
-        collection(db, 'issues'),
-        orderBy('createdAt', 'desc'),
-        limit(limitCount)
-      );
-
-      if (statusFilter) {
-        q = query(
-          collection(db, 'issues'),
-          where('status', '==', statusFilter),
-          orderBy('createdAt', 'desc'),
-          limit(limitCount)
-        );
-      }
-
-      const querySnapshot = await getDocs(q);
+      const issuesSnapshot = await getDocs(collection(db, 'issues'));
       const issues = [];
-      querySnapshot.forEach((doc) => {
-        issues.push({ id: doc.id, ...doc.data() });
+      
+      issuesSnapshot.forEach((doc) => {
+        issues.push(doc.data());
       });
-      return { success: true, data: issues };
-    } catch (error) {
-      console.error('Error fetching all issues:', error);
-      return { success: false, error: error.message };
-    }
-  },
-
-  // Update issue status
-  updateIssueStatus: async (issueId, status, updatedBy = null) => {
-    try {
-      const updateData = {
-        status,
-        updatedAt: new Date()
+      
+      const stats = {
+        totalIssues: issues.length,
+        pendingIssues: issues.filter(i => i.status === 'pending').length,
+        inProgressIssues: issues.filter(i => i.status === 'in-progress').length,
+        resolvedIssues: issues.filter(i => i.status === 'resolved').length,
+        categoryBreakdown: {},
+        priorityBreakdown: {}
       };
       
-      if (updatedBy) {
-        updateData.updatedBy = updatedBy;
-      }
-
-      const docRef = doc(db, 'issues', issueId);
-      await updateDoc(docRef, updateData);
-      return { success: true };
-    } catch (error) {
-      console.error('Error updating issue status:', error);
-      return { success: false, error: error.message };
-    }
-  },
-
-  // Delete issue
-  deleteIssue: async (issueId) => {
-    try {
-      const docRef = doc(db, 'issues', issueId);
-      await deleteDoc(docRef);
-      return { success: true };
-    } catch (error) {
-      console.error('Error deleting issue:', error);
-      return { success: false, error: error.message };
-    }
-  },
-
-  // Listen to issues changes (real-time)
-  listenToIssues: (callback, statusFilter = null) => {
-    let q = query(
-      collection(db, 'issues'),
-      orderBy('createdAt', 'desc'),
-      limit(50)
-    );
-
-    if (statusFilter) {
-      q = query(
-        collection(db, 'issues'),
-        where('status', '==', statusFilter),
-        orderBy('createdAt', 'desc'),
-        limit(50)
-      );
-    }
-
-    return onSnapshot(q, (querySnapshot) => {
-      const issues = [];
-      querySnapshot.forEach((doc) => {
-        issues.push({ id: doc.id, ...doc.data() });
+      // Calculate category and priority breakdowns
+      issues.forEach(issue => {
+        // Category breakdown
+        if (stats.categoryBreakdown[issue.category]) {
+          stats.categoryBreakdown[issue.category]++;
+        } else {
+          stats.categoryBreakdown[issue.category] = 1;
+        }
+        
+        // Priority breakdown
+        if (stats.priorityBreakdown[issue.priority]) {
+          stats.priorityBreakdown[issue.priority]++;
+        } else {
+          stats.priorityBreakdown[issue.priority] = 1;
+        }
       });
-      callback({ success: true, data: issues });
-    }, (error) => {
-      console.error('Error listening to issues:', error);
-      callback({ success: false, error: error.message });
-    });
-  }
-};
-
-// Configuration Services
-export const configServices = {
-  // Get app configuration
-  getAppConfig: async () => {
-    try {
-      const docRef = doc(db, 'config', 'app');
-      const docSnap = await getDoc(docRef);
       
-      if (docSnap.exists()) {
-        return { success: true, data: docSnap.data() };
-      } else {
-        return { success: false, error: 'Config not found' };
-      }
+      return stats;
     } catch (error) {
-      console.error('Error fetching app config:', error);
-      return { success: false, error: error.message };
-    }
-  },
-
-  // Update app configuration
-  updateAppConfig: async (configData) => {
-    try {
-      const docRef = doc(db, 'config', 'app');
-      await updateDoc(docRef, {
-        ...configData,
-        updatedAt: new Date()
-      });
-      return { success: true };
-    } catch (error) {
-      console.error('Error updating app config:', error);
-      return { success: false, error: error.message };
+      throw error;
     }
   }
 };
-
-const services = {
-  pageServices,
-  userServices,
-  issueServices,
-  configServices
-};
-
-export default services;
